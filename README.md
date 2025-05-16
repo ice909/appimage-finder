@@ -50,7 +50,7 @@ export GITHUB_TOKEN=your_github_token_here
 ### 基本用法
 
 ```bash
-python find_appimage_releases.py <topic1> [topic2...] [--repos=数量] [--output=文件名] [--latest-only]
+python find_appimage_releases.py <topic1> [topic2...] [--output=文件名] [--latest-only]
 ```
 
 ## 📋 命令行参数
@@ -58,7 +58,6 @@ python find_appimage_releases.py <topic1> [topic2...] [--repos=数量] [--output
 | 参数 | 描述 |
 |------|------|
 | `topics` | 要搜索的GitHub topic标签（必需，可提供多个） |
-| `--repos` | 每个topic要检查的仓库数量 (默认: 10) |
 | `--output` | 输出文件名前缀 (不含扩展名) |
 | `--include-checksums` | 包含校验和文件(.sha256sum, .md5等) |
 | `--latest-only` | 对于多版本AppImage，只保留最新版本 |
@@ -69,15 +68,15 @@ python find_appimage_releases.py <topic1> [topic2...] [--repos=数量] [--output
 ### 搜索单个topic
 
 ```bash
-# 搜索gui标签下的AppImage，检查前20个仓库
-python find_appimage_releases.py gui --repos=20
+# 搜索gui标签下的AppImage
+python find_appimage_releases.py gui
 ```
 
 ### 搜索多个topic
 
 ```bash
 # 同时搜索多个相关topic
-python find_appimage_releases.py gui electron qt --repos=15
+python find_appimage_releases.py gui electron qt
 ```
 
 ### 处理持续发布模式
