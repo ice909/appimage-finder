@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+
+import argparse
+import gzip
+import json
+import os
+import re
+import csv
+from datetime import datetime, timedelta
+from urllib import request
+from time import sleep
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=(
+        "AppImage Finder\n"
+        "---------------------------\n"
+        "从GH Archive数据中查找包含AppImage的GitHub Release，\n"
+        "支持按时间筛选（支持年、月、日、小时），自动下载数据，输出JSON或CSV。\n\n"
+        "示例用法:\n"
+        "  ./appimage-finder --start-time=2025-06-09 --end-time=2025-06-09\n"
+        "  ./appimage-finder --start-time=2025-06 --end-time=2025-07 --format=csv --output=result\n"
+    ))
+    parser.add_argument('--start-time', required=True,
+                        help='开始时间，格式支持 yyyy 或 yyyy-mm 或 yyyy-mm-dd 或 yyyy-mm-dd-hh')
+    parser.add_argument('--end-time', required=True,
+                        help='结束时间，格式支持 yyyy 或 yyyy-mm 或 yyyy-mm-dd 或 yyyy-mm-dd-hh')
+    parser.add_argument('--format', choices=['json', 'csv'], default='json',
+                        help='输出格式 (json 或 csv)，默认json')
+    parser.add_argument('--output', default='appimages',
+                        help='输出文件名前缀，默认appimages')
+    parser.add_argument('--include-checksums', action='store_true',
+                        help='包含校验和文件 (.sha256sum, .md5 等) 的AppImage')
+    parser.add_argument('--keep-all', action='store_true',
+                        help='保留所有版本的AppImage，不仅是最新版本（默认只保留最新）')
+    return parser.parse_args()
+
+def parse_time_str(tstr):
+    parts = tstr.split('-')
+    year = int(parts[0])
+    month = int(parts[1]) if len(parts) > 1 else None
+    day = int(parts[2]) if len(parts) > 2 else None
+    hour = int(parts[3]) if len(parts) > 3 else None
+
+    if hour is not None:
+        precision = 'hour'
+        dt = datetime(year, month, day, hour)
+    elif day is not None:
+        precision = 'day'
+        dt = datetime(year, month, day)
+    elif month is not None:
+        precision = 'month'
+        dt = datetime(year, month, 1)
+    else:
+        precision = 'year'
+        dt = datetime(year, 1, 1)
+
+    return dt, precision
+
+def adjust_end_time(dt, precision):
+    if precision == 'year':
+        return datetime(dt.year, 12, 31, 23)
+    elif precision == 'month':
+        if dt.month == 12:
+            next_month = datetime(dt.year + 1, 1, 1)
+        else:
+            next_month = datetime(dt.year, dt.month + 1, 1)
+        last_day = (next_month - timedelta(days=1)).day
+        return datetime(dt.year, dt.month, last_day, 23)
+    elif precision == 'day':
+        return datetime(dt.year, dt.month, dt.day, 23)
+    elif precision == 'hour':
+        return dt
+
+def generate_hourly_urls(start_dt, end_dt):
+    urls = []
+    cur = start_dt
+    while cur <= end_dt:
+        url = f"https://data.gharchive.org/{cur.year}-{cur.month:02d}-{cur.day:02d}-{cur.hour}.json.gz"
+        urls.append((url, cur.strftime("%Y-%m-%d-%H.json.gz")))
+        cur += timedelta(hours=1)
+    return urls
+
+def download_file(url, filename):
+    if os.path.exists(filename):
+        print(f"文件已存在，跳过下载: {filename}")
+        return
+    print(f"开始下载: {filename}")
+    try:
+        request.urlretrieve(url, filename)
+        print(f"下载完成: {filename}")
+    except Exception as e:
+        print(f"下载失败: {filename}  错误: {e}")
+
+def match_time(event_time, start_dt, end_dt):
+    dt = datetime.strptime(event_time, '%Y-%m-%dT%H:%M:%SZ')
+    return start_dt <= dt <= end_dt
+
+def extract_version_from_filename(filename):
+    match = re.search(r'[-_]?v?(\d+\.\d+(?:\.\d+)*)', filename)
+    return match.group(1) if match else None
+
+def is_continuous_release(release_name, appimages):
+    keywords = ['continuous', 'continous', 'latest', 'nightly', 'daily', 'current']
+    if release_name and any(kw in release_name.lower() for kw in keywords):
+        return True
+    versions = set()
+    for asset in appimages:
+        version = extract_version_from_filename(asset['name'])
+        if version:
+            versions.add(version)
+    return len(versions) >= 3
+
+def filter_appimages(assets, include_checksums):
+    filtered = []
+    checksum_suffixes = ('.sha256sum', '.md5', '.sha256', '.sha512', '.md5sum')
+    for asset in assets:
+        name = asset['name']
+        if name.endswith('.AppImage'):
+            filtered.append(asset)
+        elif include_checksums and any(name.endswith(suf) for suf in checksum_suffixes):
+            filtered.append(asset)
+    return filtered
+
+def keep_latest_versions(items):
+    # items是字典列表，字段里有appimage_name, 根据版本号挑最新的
+    latest = {}
+    for item in items:
+        name = item['appimage_name']
+        ver = extract_version_from_filename(name)
+        repo = item['repo']
+        key = repo + '|' + item['tag_name']
+        if key not in latest:
+            latest[key] = item
+        else:
+            old_ver = extract_version_from_filename(latest[key]['appimage_name'])
+            # 比较版本数字大小（简单按数字比较，复杂版本号需要更专业库）
+            if ver and old_ver:
+                if tuple(map(int, ver.split('.'))) > tuple(map(int, old_ver.split('.'))):
+                    latest[key] = item
+    return list(latest.values())
+
+def process_file(filepath, start_dt, end_dt, include_checksums, keep_all, results):
+    with gzip.open(filepath, 'rt', encoding='utf-8') as f:
+        for line in f:
+            event = json.loads(line)
+            if event.get('type') != 'ReleaseEvent':
+                continue
+            if not match_time(event['created_at'], start_dt, end_dt):
+                continue
+            release = event['payload'].get('release')
+            if not release or not release.get('assets'):
+                continue
+            appimages = filter_appimages(release['assets'], include_checksums)
+            if not appimages:
+                continue
+            if is_continuous_release(release.get('name', ''), appimages):
+                continue
+            for asset in appimages:
+                results.append({
+                    'repo': event['repo']['name'],
+                    'release_name': release.get('name'),
+                    'tag_name': release.get('tag_name'),
+                    'published_at': release.get('published_at'),
+                    'appimage_name': asset['name'],
+                    'download_url': asset['browser_download_url']
+                })
+    if not keep_all:
+        # 只保留最新版本
+        results[:] = keep_latest_versions(results)
+
+def main():
+    args = parse_args()
+    start_dt, start_prec = parse_time_str(args.start_time)
+    end_dt, end_prec = parse_time_str(args.end_time)
+    end_dt = adjust_end_time(end_dt, end_prec)
+
+    urls = generate_hourly_urls(start_dt, end_dt)
+    os.makedirs('gharchive_tmp', exist_ok=True)
+
+    results = []
+
+    for url, filename in urls:
+        local_path = os.path.join('gharchive_tmp', filename)
+        download_file(url, local_path)
+        if os.path.exists(local_path):
+            process_file(local_path, start_dt, end_dt, args.include_checksums, args.keep_all, results)
+        sleep(0.2)  # 防止请求过快
+
+    if not results:
+        print("未发现任何有效的 AppImage 发布项。")
+        return
+
+    if args.format == 'json':
+        with open(f"{args.output}.json", 'w', encoding='utf-8') as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+    else:
+        with open(f"{args.output}.csv", 'w', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=results[0].keys())
+            writer.writeheader()
+            writer.writerows(results)
+
+    print(f"共发现 {len(results)} 个有效 AppImage 发布项，结果已保存为 {args.output}.{args.format}")
+
+if __name__ == '__main__':
+    main()
