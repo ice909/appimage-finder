@@ -9,17 +9,27 @@ import csv
 from datetime import datetime, timedelta
 from urllib import request
 from time import sleep
+from collections import defaultdict
+
+class CustomHelpFormatter(argparse.RawTextHelpFormatter):
+    def _format_usage(self, usage, actions, groups, prefix=None):
+        # 完全禁用默认的usage行显示
+        return ""
 
 def parse_args():
     parser = argparse.ArgumentParser(description=(
-        "AppImage Finder\n"
-        "---------------------------\n"
-        "从GH Archive数据中查找包含AppImage的GitHub Release，\n"
-        "支持按时间筛选（支持年、月、日、小时），自动下载数据，输出JSON或CSV。\n\n"
-        "示例用法:\n"
-        "  ./appimage-finder --start-time=2025-06-09 --end-time=2025-06-09\n"
-        "  ./appimage-finder --start-time=2025-06 --end-time=2025-07 --format=csv --output=result\n"
-    ))
+            "AppImage Finder\n"
+            "从GH Archive数据中查找包含AppImage的GitHub Release，\n"
+            "支持按时间筛选（支持年、月、日、小时），自动下载数据，输出JSON或CSV。\n\n"
+            "示例用法:\n"
+            "  ./appimage-finder --start-time=2025-06-09 --end-time=2025-06-09\n"
+            "  ./appimage-finder --start-time=2025-06 --end-time=2025-07 --format=csv --output=result\n"
+        ),
+        formatter_class=CustomHelpFormatter,
+        add_help=False  # 禁用默认的help选项
+    )
+    parser.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS,
+                      help='显示帮助信息并退出')
     parser.add_argument('--start-time', required=True,
                         help='开始时间，格式支持 yyyy 或 yyyy-mm 或 yyyy-mm-dd 或 yyyy-mm-dd-hh')
     parser.add_argument('--end-time', required=True,
@@ -32,7 +42,20 @@ def parse_args():
                         help='包含校验和文件 (.sha256sum, .md5 等) 的AppImage')
     parser.add_argument('--keep-all', action='store_true',
                         help='保留所有版本的AppImage，不仅是最新版本（默认只保留最新）')
+    parser.add_argument('--arch', choices=['x86_64', 'aarch64', 'all'], default='all',
+                        help='指定AppImage架构 (x86_64, aarch64, all)，默认all')
     return parser.parse_args()
+
+def extract_architecture(filename):
+    """从文件名中提取架构信息"""
+    arch_patterns = {
+        'x86_64': r'(x86_64|x86-64|amd64|64bit|x64|x86)',
+        'aarch64': r'(aarch64|arm64|ARM64)',
+    }
+    for arch, pattern in arch_patterns.items():
+        if re.search(pattern, filename, re.IGNORECASE):
+            return arch
+    return None
 
 def parse_time_str(tstr):
     parts = tstr.split('-')
@@ -110,36 +133,39 @@ def is_continuous_release(release_name, appimages):
             versions.add(version)
     return len(versions) >= 3
 
-def filter_appimages(assets, include_checksums):
+def filter_appimages(assets, include_checksums, target_arch):
     filtered = []
     checksum_suffixes = ('.sha256sum', '.md5', '.sha256', '.sha512', '.md5sum')
+    
     for asset in assets:
         name = asset['name']
         if name.endswith('.AppImage'):
-            filtered.append(asset)
+            arch = extract_architecture(name)
+            if target_arch == 'all':
+                filtered.append(asset)
+            elif arch == target_arch:
+                filtered.append(asset)
+            elif arch is None and target_arch == 'x86_64':
+                # 文件名未标注架构，且目标是 x86_64，则认为是 x86_64
+                filtered.append(asset)
         elif include_checksums and any(name.endswith(suf) for suf in checksum_suffixes):
-            filtered.append(asset)
+            base_name = name.split('.')[0]
+            if any(a['name'].startswith(base_name) and a['name'].endswith('.AppImage') for a in assets):
+                filtered.append(asset)
     return filtered
 
-def keep_latest_versions(items):
-    # items是字典列表，字段里有appimage_name, 根据版本号挑最新的
+def keep_latest_versions(results):
     latest = {}
-    for item in items:
-        name = item['appimage_name']
-        ver = extract_version_from_filename(name)
-        repo = item['repo']
-        key = repo + '|' + item['tag_name']
-        if key not in latest:
+    for item in results:
+        # key 变成 (repo, architecture)
+        key = (item['repo'], item['architecture'])
+        if key not in latest or \
+           datetime.strptime(item['published_at'], '%Y-%m-%dT%H:%M:%SZ') > \
+           datetime.strptime(latest[key]['published_at'], '%Y-%m-%dT%H:%M:%SZ'):
             latest[key] = item
-        else:
-            old_ver = extract_version_from_filename(latest[key]['appimage_name'])
-            # 比较版本数字大小（简单按数字比较，复杂版本号需要更专业库）
-            if ver and old_ver:
-                if tuple(map(int, ver.split('.'))) > tuple(map(int, old_ver.split('.'))):
-                    latest[key] = item
     return list(latest.values())
 
-def process_file(filepath, start_dt, end_dt, include_checksums, keep_all, results):
+def process_file(filepath, start_dt, end_dt, include_checksums, keep_all, target_arch, results):
     with gzip.open(filepath, 'rt', encoding='utf-8') as f:
         for line in f:
             event = json.loads(line)
@@ -150,19 +176,23 @@ def process_file(filepath, start_dt, end_dt, include_checksums, keep_all, result
             release = event['payload'].get('release')
             if not release or not release.get('assets'):
                 continue
-            appimages = filter_appimages(release['assets'], include_checksums)
+            appimages = filter_appimages(release['assets'], include_checksums, target_arch)
             if not appimages:
                 continue
             if is_continuous_release(release.get('name', ''), appimages):
                 continue
             for asset in appimages:
+                arch = extract_architecture(asset['name'])
+                if (target_arch == 'all' or target_arch == 'x86_64') and arch is None:
+                    arch = 'x86_64'  # 默认认为未标注架构的为 x86_64
                 results.append({
                     'repo': event['repo']['name'],
                     'release_name': release.get('name'),
                     'tag_name': release.get('tag_name'),
                     'published_at': release.get('published_at'),
                     'appimage_name': asset['name'],
-                    'download_url': asset['browser_download_url']
+                    'download_url': asset['browser_download_url'],
+                    'architecture': arch 
                 })
     if not keep_all:
         # 只保留最新版本
@@ -183,23 +213,40 @@ def main():
         local_path = os.path.join('gharchive_tmp', filename)
         download_file(url, local_path)
         if os.path.exists(local_path):
-            process_file(local_path, start_dt, end_dt, args.include_checksums, args.keep_all, results)
+            process_file(local_path, start_dt, end_dt, args.include_checksums, args.keep_all, args.arch, results)
         sleep(0.2)  # 防止请求过快
 
     if not results:
         print("未发现任何有效的 AppImage 发布项。")
         return
 
-    if args.format == 'json':
-        with open(f"{args.output}.json", 'w', encoding='utf-8') as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+    if args.arch == 'all':
+        # 按架构分组
+        arch_groups = defaultdict(list)
+        for item in results:
+            arch = item['architecture'] or 'unknown'
+            arch_groups[arch].append(item)
+        for arch, group in arch_groups.items():
+            if args.format == 'json':
+                with open(f"{args.output}-{arch}.json", 'w', encoding='utf-8') as f:
+                    json.dump(group, f, ensure_ascii=False, indent=2)
+            else:
+                with open(f"{args.output}-{arch}.csv", 'w', encoding='utf-8', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=group[0].keys())
+                    writer.writeheader()
+                    writer.writerows(group)
+        print(f"共发现 {len(results)} 个有效 AppImage 发布项，结果已按架构分别保存为 {args.output}-<arch>.{args.format}")
     else:
-        with open(f"{args.output}.csv", 'w', encoding='utf-8', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=results[0].keys())
-            writer.writeheader()
-            writer.writerows(results)
-
-    print(f"共发现 {len(results)} 个有效 AppImage 发布项，结果已保存为 {args.output}.{args.format}")
+        # 单一架构
+        if args.format == 'json':
+            with open(f"{args.output}.json", 'w', encoding='utf-8') as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+        else:
+            with open(f"{args.output}.csv", 'w', encoding='utf-8', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=results[0].keys())
+                writer.writeheader()
+                writer.writerows(results)
+        print(f"共发现 {len(results)} 个有效 AppImage 发布项，结果已保存为 {args.output}.{args.format}")
 
 if __name__ == '__main__':
     main()
