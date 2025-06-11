@@ -220,6 +220,25 @@ def keep_latest_versions(results):
             latest[key] = item
     return list(latest.values())
 
+def extract_version_4digit(tag, filename):
+    # 尝试从 tag 或文件名里提取形如1.2.3.4、1.2.3、1.2等
+    for s in [tag, filename]:
+        if not s:
+            continue
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?", s)
+        if m:
+            parts = [int(p) if p else 0 for p in m.groups()]
+            while len(parts) < 4:
+                parts.append(0)
+            return ".".join(str(x) for x in parts[:4])
+    return "1.0.0.0"
+
+
+def get_package_name(repo):
+    # io.github.owner.repo，全部小写
+    owner, repo_name = repo.lower().split("/", 1)
+    return f"io.github.{owner}.{repo_name}"
+
 
 def process_file(
     filepath, start_dt, end_dt, include_checksums, keep_all, target_arch, results
@@ -245,6 +264,8 @@ def process_file(
                 arch = extract_architecture(asset["name"])
                 if (target_arch == "all" or target_arch == "x86_64") and arch is None:
                     arch = "x86_64"  # 默认认为未标注架构的为 x86_64
+                version = extract_version_4digit(release.get("tag_name"), asset["name"])
+                package_name = get_package_name(event["repo"]["name"])
                 results.append(
                     {
                         "repo": event["repo"]["name"],
@@ -254,6 +275,8 @@ def process_file(
                         "appimage_name": asset["name"],
                         "download_url": asset["browser_download_url"],
                         "architecture": arch,
+                        "package_name": package_name,
+                        "version": version,
                     }
                 )
     if not keep_all:
