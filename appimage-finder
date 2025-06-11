@@ -146,22 +146,9 @@ def download_file(url, filename):
         return
 
     print(f"开始下载: {filename}")
-    start_time = datetime.now()
 
     try:
-
-        def report_progress(count, block_size, total_size):
-            duration = (datetime.now() - start_time).total_seconds()
-            downloaded = count * block_size
-            if duration > 0:
-                speed = downloaded / duration / 1024  # KB/s
-                percent = min(int(count * block_size * 100 / total_size), 100)
-                print(
-                    f"\r{filename}: {percent}% - {downloaded / 1024 / 1024:.1f}MB/{total_size / 1024 / 1024:.1f}MB - {speed:.1f}KB/s",
-                    end="",
-                )
-
-        request.urlretrieve(url, filename, reporthook=report_progress)
+        request.urlretrieve(url, filename)
         print(f"\n下载完成: {filename}")
     except Exception as e:
         print(f"\n下载失败: {filename}  错误: {e}")
