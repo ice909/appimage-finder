@@ -11,6 +11,7 @@ from urllib import request
 from time import sleep
 from collections import defaultdict
 import sys
+import subprocess
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -148,10 +149,17 @@ def download_file(url, filename):
     print(f"开始下载: {filename}")
 
     try:
-        request.urlretrieve(url, filename)
+        # --continue 支持断点续传, --tries=3 尝试3次, --timeout=60 设置超时
+        subprocess.run(
+            ["wget", "-O", filename, "--continue", "--tries=3", "--timeout=60", url],
+            check=True,
+            encoding="utf-8",
+        )
         print(f"\n下载完成: {filename}")
     except Exception as e:
         print(f"\n下载失败: {filename}  错误: {e}")
+        if os.path.exists(filename):
+            os.remove(filename)  # 删除损坏的文件
 
 
 def match_time(event_time, start_dt, end_dt):
