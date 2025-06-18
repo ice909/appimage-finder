@@ -7,13 +7,15 @@ import os
 import re
 import csv
 from datetime import datetime, timedelta
-from urllib import request
 from time import sleep
 from collections import defaultdict
 import sys
 import subprocess
 
 sys.stdout.reconfigure(line_buffering=True)
+
+# 脚本版本
+__version__ = "0.1.0"
 
 
 class CustomHelpFormatter(argparse.RawTextHelpFormatter):
@@ -76,6 +78,9 @@ def parse_args():
         choices=["x86_64", "aarch64", "all"],
         default="all",
         help="指定AppImage架构 (x86_64, aarch64, all)，默认all",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     return parser.parse_args()
 
@@ -219,6 +224,7 @@ def keep_latest_versions(results):
         ) > datetime.strptime(latest[key]["published_at"], "%Y-%m-%dT%H:%M:%SZ"):
             latest[key] = item
     return list(latest.values())
+
 
 def extract_version_4digit(tag, filename):
     # 尝试从 tag 或文件名里提取形如1.2.3.4、1.2.3、1.2等
