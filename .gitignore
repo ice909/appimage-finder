@@ -1,3 +1,5 @@
 *.json
 *.csv
 gharchive_tmp/
+dist/
+build/
